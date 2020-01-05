@@ -8,13 +8,21 @@ use crate::buffer::{read_buf::Lz4ReadBuf, write_buf::Lz4WriteBuf};
 
 #[derive(Debug)]
 pub enum DecodeError {
+    /// Wrong LZ4 magic number
     WrongMagic,
+    /// Wrong LZ4 version
     WrongVersion,
+    /// Error occured while data reading
     ReadIoError(io::Error),
+    /// Error occured while data writing
     WriteIoError(io::Error),
+    /// Usnuppoted LZ4 feature
     UnsuppotedFeature(String),
+    /// Invalud block size (possibly, larger than internal buffer)
     InvalidBlockSize(usize),
+    /// Data stream is corrupted
     CorruptedData,
+    /// All data decopressed but reader contains unrecognized data at end
     UnknownDataAtEnd,
 }
 
@@ -30,6 +38,7 @@ impl fmt::Display for DecodeError {
 
 impl Error for DecodeError {}
 
+/// Decoder for LZ4 compressed data
 #[derive(Debug)]
 pub struct LzDecoder {
     input_buffer: Lz4ReadBuf,
@@ -46,12 +55,6 @@ struct FrameHeaderInfo {
     header_size: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct BlockInfo {
-    size: u32,
-    is_raw: bool,
-}
-
 #[inline]
 fn is_bit_set(n: u8, i: u8) -> bool {
     return n & (1 << i) != 0;
@@ -66,12 +69,14 @@ impl LzDecoder {
 
     const BASE_MATCH_LEN: usize = 4;
 
+    /// Create new decoder
     pub fn new() -> Self {
         LzDecoder {
             input_buffer: Lz4ReadBuf::with_capacity(Self::INPUT_BUFFER_SIZE),
         }
     }
 
+    /// Read compressed data from `input` and write decopressed  to `output`
     pub fn decode<R, W>(&mut self, input: &mut R, output: &mut W) -> DecodeResult<()>
     where
         R: Read,
@@ -92,11 +97,6 @@ impl LzDecoder {
 
             let mask = 1 << 31;
             let is_raw = bs_data & mask != 0;
-            if is_raw {
-                return Err(DecodeError::UnsuppotedFeature(
-                    "Uncompressed Blocks".to_string(),
-                ));
-            }
 
             let block_size = (bs_data & (mask - 1)) as usize;
 
@@ -107,9 +107,19 @@ impl LzDecoder {
             if block_size >= self.input_buffer.capacity() {
                 return Err(DecodeError::InvalidBlockSize(block_size));
             }
+
             self.input_buffer
                 .extend_read(input, block_size)
                 .map_err(ReadIoError)?;
+
+            if is_raw {
+                let n = self.input_buffer.len();
+                output
+                    .write_all(&self.input_buffer[..n])
+                    .map_err(WriteIoError)?;
+                self.input_buffer.consume(n);
+                continue;
+            }
 
             loop {
                 let block_completed = self.process_sequence(&mut output)?;
@@ -142,10 +152,11 @@ impl LzDecoder {
         if lit_len > self.input_buffer.len() {
             return Err(DecodeError::CorruptedData);
         }
+
         output
             .write_all(&self.input_buffer[..lit_len])
             .map_err(WriteIoError)?;
-        self.input_buffer.drop_beg(lit_len);
+        self.input_buffer.consume(lit_len);
 
         if self.input_buffer.len() == 0 {
             return Ok(true);
@@ -158,8 +169,10 @@ impl LzDecoder {
         if offset == 0 {
             return Err(DecodeError::CorruptedData);
         }
-        self.input_buffer.drop_beg(Self::U16_LEN);
+
+        self.input_buffer.consume(Self::U16_LEN);
         let match_len = self.get_var_int_from_buf(tok & 0x0F)? + Self::BASE_MATCH_LEN;
+
         output
             .copy_from_offset(offset, match_len)
             .map_err(WriteIoError)?;
@@ -248,7 +261,7 @@ impl LzDecoder {
         // TODO: check header checksum
         let _ = self.input_buffer[header_size];
 
-        self.input_buffer.drop_beg(header_size);
+        self.input_buffer.consume(header_size);
         self.input_buffer.compact();
 
         let header_info = FrameHeaderInfo {
