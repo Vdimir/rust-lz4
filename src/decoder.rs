@@ -93,6 +93,8 @@ impl LzDecoder {
         }
 
         loop {
+            self.input_buffer.compact();
+
             let bs_data = self.read_u32(input)?;
 
             let mask = 1 << 31;
