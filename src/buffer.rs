@@ -94,6 +94,7 @@ pub mod write_buf {
         inner: W,
         buf: Box<[u8]>,
         end: usize,
+        total_written: usize,
     }
 
     impl<W: Write> Lz4WriteBuf<W> {
@@ -104,6 +105,7 @@ pub mod write_buf {
                 inner: inner,
                 buf: vec![0u8; cap_round].into_boxed_slice(),
                 end: 0,
+                total_written: 0,
             }
         }
 
@@ -136,12 +138,13 @@ pub mod write_buf {
                 amt,
             );
 
+            self.total_written += n;
             self.inner.write_all(&self.buf[index..index + n])?;
             self.buf.copy_within(index..index + n, self.end);
             self.end = (self.end + n) & (self.buf.len() - 1);
 
             if n < amt {
-                return self.copy_non_overlap(self.end, amt - n);
+                return self.copy_non_overlap((index + n) & (self.buf.len() - 1), amt - n);
             }
             return Ok(());
         }
@@ -161,6 +164,7 @@ pub mod write_buf {
 
             self.buf[..amt - n].copy_from_slice(&buf[n..amt]);
             self.end = (self.end + amt) & (self.buf.len() - 1);
+            self.total_written += amt;
             return Ok(amt);
         }
 
